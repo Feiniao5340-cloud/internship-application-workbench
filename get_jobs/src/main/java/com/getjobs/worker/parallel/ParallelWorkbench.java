@@ -69,7 +69,7 @@ public class ParallelWorkbench {
         repository.document(id,"config",config);
     }
     public Map<String,Object> status() {
-        Map<String,Object> result=new LinkedHashMap<>();result.put("name","实习投递工作台 · 朋友试用版");result.put("version","2.1.0-preview.1");result.put("distribution","portable-preview");
+        Map<String,Object> result=new LinkedHashMap<>();result.put("name","实习投递工作台");result.put("version","2.1.0-preview.1");result.put("distribution","portable-preview");
         result.put("development",true);result.put("liveEnabled",live);result.put("sendingEnabled",sending);result.put("modelEnabled",modeling);result.put("protectProductionAccounts",protect);
         result.put("notificationsEnabled",notifications);
         result.put("deadline",deadline);result.put("deadlineStopped",deadlineStopped||windowExpired());
