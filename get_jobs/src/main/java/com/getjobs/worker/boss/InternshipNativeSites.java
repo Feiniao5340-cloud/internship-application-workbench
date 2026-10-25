@@ -2,6 +2,7 @@ package com.getjobs.worker.boss;
 
 import com.getjobs.worker.parallel.Platforms;
 import com.microsoft.playwright.*;
+import com.getjobs.worker.manager.BackgroundBrowserPages;
 import org.json.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -71,7 +72,7 @@ public class InternshipNativeSites {
         String name=first(p,selectors);return !name.isBlank()&&!name.matches(".*(登录|注册).*" );
     }
     public Map<String,Object> checkSession(Page p) {
-        p.navigate(platform.equals("zhilian")?ZHILIAN_CAMPUS_RECOMMEND:legacyHome());p.bringToFront();
+        p.navigate(platform.equals("zhilian")?ZHILIAN_CAMPUS_RECOMMEND:legacyHome());
         try{check(p);}catch(IllegalStateException e){return Map.of("loggedIn",false,"requiresUserAction",true,"message",e.getMessage(),"persistent",true);}
         for(int i=0;i<20&&!loggedIn(p);i++)p.waitForTimeout(200);
         return Map.of("loggedIn",loggedIn(p),"message",loggedIn(p)?"已识别该平台登录界面":"请在该平台独立浏览器手动登录，再检查登录态","persistent",true);
@@ -165,7 +166,7 @@ public class InternshipNativeSites {
                 if(!canonical(platform,opened.url()).isBlank()){stage="等待前程详情正文";opened.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);retained=true;return opened;}
                 check(opened);URI destination=URI.create(opened.url());String location=destination.getHost()==null?destination.getScheme():destination.getHost()+destination.getPath();
                 store.recordReadFailure(p.url()+"#card-"+InternshipPolicy.hash(signature),"岗位名称未打开可核对的详情链接，未读取其他推荐职位；跳转位置："+location);
-            }catch(AttentionRequired e){if(opened!=null){opened.bringToFront();retained=true;}throw e;}
+            }catch(AttentionRequired e){if(opened!=null){retained=true;}throw e;}
             catch(PlaywrightException e){if(!stopped.getAsBoolean()){String location="尚未取得新标签页";if(opened!=null)try{URI u=URI.create(opened.url());location=u.getHost()==null?u.getScheme():u.getHost()+u.getPath();}catch(Exception ignored){}store.recordReadFailure(p.url()+"#card-"+InternshipPolicy.hash(signature),"岗位名称打开详情超时，已跳过；阶段："+stage+"；位置："+location);progress.accept("前程无忧：岗位详情打开异常，继续下一条");}}
             finally{if(opened!=null&&!retained)opened.close();}
         }return null;
@@ -216,10 +217,10 @@ public class InternshipNativeSites {
                 for(String detailUrl:urls) {
                     if(stopped.getAsBoolean()||count>=c.getInt("maxScan")){if(campusDetail!=null)campusDetail.close();return;}
                     if(!seen.add(canonical(platform,detailUrl))||store.blocksRetry(store.get(InternshipPolicy.hash(canonical(platform,detailUrl))))){if(campusDetail!=null)campusDetail.close();continue;}found=true;
-                    Page detail=campusDetail==null?list.context().newPage():campusDetail;detail.setDefaultTimeout(8000);detail.setDefaultNavigationTimeout(25000);
+                    Page detail=campusDetail==null?BackgroundBrowserPages.create(list.context()):campusDetail;detail.setDefaultTimeout(8000);detail.setDefaultNavigationTimeout(25000);
                     JSONObject job;boolean needsAttention=false;
                     try {if(campusDetail==null)detail.navigate(detailUrl);job=readJob(detail,detailUrl);}
-                    catch(AttentionRequired e){needsAttention=true;store.recordReadFailure(detailUrl,e.getMessage());detail.bringToFront();throw e;}
+                    catch(AttentionRequired e){needsAttention=true;store.recordReadFailure(detailUrl,e.getMessage());throw e;}
                     catch(PlaywrightException|IllegalStateException e){
                         if(stopped.getAsBoolean())return;
                         lastFailure=e instanceof PlaywrightException?"岗位页面加载或必要字段读取超时":e.getMessage();
@@ -250,7 +251,7 @@ public class InternshipNativeSites {
     boolean completed(Page p) {
         String receipt=first(p,".deliver-dialog;.successContent;.apply-success;.delivery-success;.a-job-apply-workflow;.el-message--success");
         if(java.util.regex.Pattern.compile("(?:^|\\n)\\s*(申请成功|投递成功|简历投递成功)[！!。\\s]*(?:$|\\n)").matcher(receipt).find())return true;
-        String controls=switch(platform){case "zhilian"->"button.collect-and-apply__btn,.job-header button,.summary-plane button,.apply-button";case "job51"->".apply-button,.apply-btn-new,.jobDetail-button,.job-header button";default->".position-deliver,.position-head .resume-deliver,.job-header button,.apply-button";};
+        String controls=switch(platform){case "zhilian"->"button.collect-and-apply__btn,.job-banner__deliver__btn,.job-header button,.summary-plane button,.apply-button";case "job51"->".apply-button,.apply-btn-new,.jobDetail-button,.job-header button";default->".position-deliver,.position-head .resume-deliver,.job-header button,.apply-button";};
         List<Locator> submitted=p.locator(controls).all().stream().filter(l->l.isVisible()&&l.innerText().trim().matches("已投递|已申请")).toList();
         return submitted.size()==1&&applyButtons(p).isEmpty();
     }
@@ -278,14 +279,14 @@ public class InternshipNativeSites {
         }return matches.size()==1?matches.getFirst():Map.of();
     }
     private Map<String,Object> verifyJob51History(Page root,JSONObject job,BooleanSupplier stopped) {
-        Page history=root.context().newPage();history.setDefaultNavigationTimeout(25000);
+        Page history=BackgroundBrowserPages.create(root.context());history.setDefaultNavigationTimeout(25000);
         try{history.navigate("https://i.51job.com/userset/my_apply.php");for(int n=0;n<24&&!stopped.getAsBoolean();n++){check(history);Map<String,Object> receipt=job51HistoryReceipt(history,job);if(!receipt.isEmpty())return receipt;history.waitForTimeout(250);}return Map.of();}finally{history.close();}
     }
     boolean chatIdentity(Page p,JSONObject job) {
         if(!platform.equals("zhilian")||!zhilianChatUrl(p.url()))return false;
         Locator active=p.locator(".im-session-item.is-active");if(active.count()!=1||!active.isVisible())return false;
         for(var pair:Map.of("title",".im-session-item__job","company",".im-session-item__company-name","salary",".im-session-item__salary").entrySet())
-            if(!first(p,".im-session-item.is-active "+pair.getValue()).replaceAll("\\s+","").equals(job.optString(pair.getKey()).replaceAll("\\s+","")))return false;
+            if(active.locator(pair.getValue()).count()!=1||!active.locator(pair.getValue()).innerText().replaceAll("\\s+","").equals(job.optString(pair.getKey()).replaceAll("\\s+","")))return false;
         if(!first(p,".im-chat-header__job-title").equals(job.optString("title"))||!first(p,".im-chat-header__salary").equals(job.optString("salary"))
                 ||!first(p,".im-chat-header__meta-text").equals(job.optString("company")))return false;
         return true;
@@ -295,12 +296,33 @@ public class InternshipNativeSites {
         return p.locator(".im-message--custom .im-message__bubble--me").all().stream().filter(Locator::isVisible)
                 .map(Locator::innerText).anyMatch(t->t.trim().matches("(?is).+\\.(pdf|docx?)")&&!t.matches("(?s).*(发送中|上传中|失败).*"));
     }
+    boolean selectReceiptConversation(Page p,JSONObject job) {
+        if(!platform.equals("zhilian")||!zhilianChatUrl(p.url()))return false;
+        if(chatIdentity(p,job))return true;
+        var selectors=Map.of("title",".im-session-item__job","company",".im-session-item__company-name","salary",".im-session-item__salary");
+        var matches=p.locator(".im-session-item").all().stream().filter(Locator::isVisible).filter(row->selectors.entrySet().stream().allMatch(pair->{
+            Locator value=row.locator(pair.getValue());String expected=job.optString(pair.getKey());
+            return !expected.isBlank()&&value.count()==1&&value.innerText().replaceAll("\\s+","").equals(expected.replaceAll("\\s+",""));
+        })).toList();
+        if(matches.size()!=1)return false;
+        // Select a conversation only. Never click a resume, greeting or submit action here.
+        matches.getFirst().click();return true;
+    }
     private void confirmNative(String id,JSONObject entry,String source,boolean automatic) {
         entry.put("status","complete").put("nativeResumeConfirmed",true).put("nativeReceiptSource",source);entry.remove("lastDeliveryIssue");store.save(id,entry);
         JSONObject proof=new JSONObject().put("liveSubmissionVerified",automatic).put("recordId",id).put("at",Instant.now().toString()).put("source",source).put("automationVerified",automatic);
         store.updateSchedule(s->{JSONObject previous=s.optJSONObject("nativeAcceptance");if(automatic||previous==null||previous.optString("recordId").equals(id))s.put("nativeAcceptance",proof);});
     }
     public Object verifyExistingReceipt(String id,JSONObject entry,Page p,String url) {
+        if(platform.equals("zhilian")&&entry.optString("status").equals("native_attempted")&&!canonical(platform,url).isBlank()&&canonical(platform,url).equals(canonical(platform,entry.getJSONObject("job").optString("url")))) {
+            Page receipt=BackgroundBrowserPages.create(p.context());receipt.setDefaultNavigationTimeout(25000);
+            try{receipt.navigate(navigationUrl(platform,url));
+                for(int n=0;n<32&&!completed(receipt);n++)receipt.waitForTimeout(250);check(receipt);
+                if(!loggedIn(receipt)||!same(entry.getJSONObject("job"),readJob(receipt,url)))throw new IllegalStateException("同岗位登录身份或已投递回执未确认，继续锁定");
+                if(!completed(receipt))return verifyExistingReceipt(id,entry,p,"https://i.zhaopin.com/im");
+                confirmNative(id,entry,"zhilian-persisted-job-receipt",false);return Map.of("confirmed",true,"nativeResumeConfirmed",true,"automationVerified",false,"newSubmission",false);
+            }finally{receipt.close();}
+        }
         if(platform.equals("job51")) {
             String expected=job51Id(entry.getJSONObject("job").optString("url"));
             if(!entry.optString("status").equals("native_attempted")||!(url.equals("https://i.51job.com/userset/my_apply.php")||!expected.isBlank()&&url.equals("https://jobs.51job.com/applysuccess.php?jobid="+expected)))throw new IllegalStateException("仅核对前程已有发送尝试的申请记录，不重复投递");
@@ -308,9 +330,14 @@ public class InternshipNativeSites {
             entry.put("nativeReceiptEvidence",new JSONObject(receipt));confirmNative(id,entry,"job51-application-history",true);return Map.of("confirmed",true,"nativeResumeConfirmed",true,"automationVerified",true,"newSubmission",false,"resumeName",receipt.get("resumeName"));
         }
         if(!platform.equals("zhilian")||!Set.of("native_attempted","complete").contains(entry.optString("status"))||!zhilianChatUrl(url))throw new IllegalStateException("仅核对智联已尝试投递的站内会话，不重新投递");
-        Page receipt=p.context().newPage();
-        try{receipt.navigate(url);for(int n=0;n<32&&!chatReceipt(receipt,entry.getJSONObject("job"));n++)receipt.waitForTimeout(250);check(receipt);
-            if(!chatReceipt(receipt,entry.getJSONObject("job")))throw new IllegalStateException("会话身份或附件简历回执未确认，记录继续锁定");
+        Page receipt=BackgroundBrowserPages.create(p.context());
+        try{receipt.navigate(url);boolean selected=false;for(int n=0;n<32&&!chatReceipt(receipt,entry.getJSONObject("job"));n++){if(!selected)selected=selectReceiptConversation(receipt,entry.getJSONObject("job"));receipt.waitForTimeout(250);}check(receipt);
+            if(!chatReceipt(receipt,entry.getJSONObject("job"))){
+                entry.put("nativeReceiptCheck",new JSONObject().put("url",receipt.url()).put("identity",chatIdentity(receipt,entry.getJSONObject("job")))
+                    .put("title",first(receipt,".im-chat-header__job-title")).put("company",first(receipt,".im-chat-header__meta-text")).put("salary",first(receipt,".im-chat-header__salary"))
+                    .put("active",receipt.locator(".im-session-item.is-active").allTextContents()).put("bubbles",receipt.locator(".im-message--custom .im-message__bubble--me").allTextContents()));store.save(id,entry);
+                throw new IllegalStateException("会话身份或附件简历回执未确认，记录继续锁定");
+            }
             confirmNative(id,entry,"zhilian-persisted-chat-attachment",false);return Map.of("confirmed",true,"nativeResumeConfirmed",true,"automationVerified",false,"newSubmission",false);
         }finally{receipt.close();}
     }
@@ -336,6 +363,7 @@ public class InternshipNativeSites {
     }
     private boolean awaitNativeReceipt(String id,JSONObject entry,Page original,Set<Page> before,BooleanSupplier stopped,boolean initialSubmission) {
         boolean dialogSubmitted=entry.optBoolean("nativeDialogSubmitted");
+        Set<Page> selectedReceipts=new HashSet<>();
         for(int n=0;n<100&&!stopped.getAsBoolean();n++) {
             List<Page> popups=platform.equals("zhilian")?original.context().pages().stream().filter(page->!before.contains(page)&&!page.isClosed()&&zhilianChatUrl(page.url())).toList():List.of();
             if(platform.equals("zhilian")&&popups.isEmpty())popups=original.context().pages().stream().filter(page->!page.isClosed()&&chatIdentity(page,entry.getJSONObject("job"))).toList();
@@ -343,6 +371,7 @@ public class InternshipNativeSites {
             String host=URI.create(p.url()).getHost(),owned=URI.create(legacyHome()).getHost().replace("www.","");
             if(host==null||!(host.equals(owned)||host.endsWith("."+owned)))throw new IllegalStateException("该岗位跳转外部网申，未继续填写或提交");
             check(p);
+            if(platform.equals("zhilian")&&zhilianChatUrl(p.url())&&!selectedReceipts.contains(p)&&!chatIdentity(p,entry.getJSONObject("job"))&&selectReceiptConversation(p,entry.getJSONObject("job")))selectedReceipts.add(p);
             if(platform.equals("job51")&&!job51Id(entry.getJSONObject("job").optString("url")).isBlank()&&p.url().equals("https://jobs.51job.com/applysuccess.php?jobid="+job51Id(entry.getJSONObject("job").optString("url")))) {
                 Map<String,Object> receipt=verifyJob51History(p,entry.getJSONObject("job"),stopped);
                 if(!receipt.isEmpty()){entry.put("nativeReceiptEvidence",new JSONObject(receipt));confirmNative(id,entry,"job51-application-history",true);return true;}
@@ -388,7 +417,7 @@ public class InternshipNativeSites {
         boolean job51Receipt=platform.equals("job51")&&url.matches("https://jobs\\.51job\\.com/applysuccess\\.php\\?jobid=\\d+");
         boolean nativeChat=platform.equals("zhilian")&&zhilianChatUrl(url);
         String target=campusListing||resumeCenter||nativeChat||job51Receipt||job51History?url:navigationUrl(platform,url);if(target.isBlank())throw new IllegalArgumentException("只允许读取当前平台的真实岗位链接或已核对的推荐、简历、会话、回执、申请记录入口");
-        Page detail=list.context().newPage();detail.setDefaultTimeout(8000);detail.setDefaultNavigationTimeout(25000);boolean needsAttention=false;
+        Page detail=BackgroundBrowserPages.create(list.context());detail.setDefaultTimeout(8000);detail.setDefaultNavigationTimeout(25000);boolean needsAttention=false;
         try {
             detail.navigate(target);if(URI.create(target).getHost().equals("xiaoyuan.zhaopin.com"))for(int n=0;n<50&&first(detail,"body").length()<50;n++)detail.waitForTimeout(200);
             Map<String,Object> result=new LinkedHashMap<>(diagnostic(detail));
@@ -407,7 +436,7 @@ public class InternshipNativeSites {
             result.put("headerAncestors",detail.locator("h1").count()==0?List.of():detail.locator("h1").first().evaluate("el=>{let out=[];for(let n=el,i=0;n&&i<4;n=n.parentElement,i++)out.push({tag:n.tagName,cls:n.className,text:n.innerText?.slice(0,2000),children:[...n.querySelectorAll('*')].slice(0,35).map(e=>({tag:e.tagName,cls:e.className,text:e.children.length?undefined:e.innerText?.slice(0,180)}))});return out}"));
             result.put("readProbe",Map.of("title",first(detail,titleSelectors()),"company",first(detail,companySelectors()),"salary",first(detail,salarySelectors()),"city",first(detail,citySelectors()),"jdLength",first(detail,jdSelectors()).length()));
             try{result.put("job",readJob(detail,target).toMap());}
-            catch(AttentionRequired e){needsAttention=true;detail.bringToFront();result.put("jobError",e.getMessage());result.put("requiresUserAction",true);}
+            catch(AttentionRequired e){needsAttention=true;result.put("jobError",e.getMessage());result.put("requiresUserAction",true);}
             catch(PlaywrightException e){result.put("jobError","岗位页面加载或必要字段读取超时，未获得完整详情");}
             catch(IllegalStateException e){result.put("jobError",e.getMessage());}
             result.put("detailElements",detail.locator("h1,h2,[class*=salary],[class*=describ],[class*=job-title],[class*=job-des],[class*=jobDetail],[class*=jobdetail],[class*=company-name]")

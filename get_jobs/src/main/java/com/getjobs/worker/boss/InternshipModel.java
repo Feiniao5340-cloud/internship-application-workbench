@@ -34,7 +34,11 @@ public class InternshipModel {
             return answer;
         } catch(Exception e) {
             ready=false;
-            state = stopped.getAsBoolean() ? "模型任务已暂停" : "模型调用失败或超时，请检查账号和网络后重试";
+            state = stopped.getAsBoolean() ? "模型任务已暂停"
+                    : e instanceof ModelFailure ? e.getMessage()
+                    : e instanceof java.util.concurrent.TimeoutException ? "模型响应超时，请稍后重试或检查网络"
+                    : e instanceof org.json.JSONException ? "模型返回数据不符合JSON约定，未执行投递"
+                    : "模型调用失败，请检查本机程序和网络";
             throw new IllegalStateException(state,e);
         }
     }
@@ -61,10 +65,10 @@ public class InternshipModel {
     }
     private String codex(String prompt, BooleanSupplier stopped) throws Exception {
         if(executable.isBlank() || !Files.isRegularFile(Path.of(executable)))
-            throw new IllegalStateException("未找到Codex，请检查安装和启动配置");
+            throw new ModelFailure("未找到Codex，请检查安装和启动配置");
         Path root=Path.of("data","internship","model-runs").toAbsolutePath();
         Files.createDirectories(root);
-        Path run=Files.createTempDirectory(root,"run-"), schema=run.resolve("schema.json"), output=run.resolve("answer.json");
+        Path run=Files.createTempDirectory(root,"run-"), schema=run.resolve("schema.json"), output=run.resolve("answer.json"), errors=run.resolve("stderr-private.txt");
         Process process=null;
         try {
             Files.writeString(schema,schema().toString(),StandardCharsets.UTF_8);
@@ -75,7 +79,7 @@ public class InternshipModel {
                     "-C",run.toString(),"--output-schema",schema.toString(),"-o",output.toString(),"-"));
             if(fastMode)command.addAll(command.size()-1,List.of("-c","service_tier=\"priority\"","-c","features.fast_mode=true"));
             ProcessBuilder builder=new ProcessBuilder(command).directory(run.toFile())
-                    .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD);
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(errors.toFile());
             // Reuse the user's enabled system proxy only for this model subprocess.
             if(!proxy.isBlank()) {
                 builder.environment().put("HTTPS_PROXY",proxy);builder.environment().put("HTTP_PROXY",proxy);
@@ -87,10 +91,11 @@ public class InternshipModel {
             }
             long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(timeout);
             while(!process.waitFor(250,TimeUnit.MILLISECONDS)) {
-                if(stopped.getAsBoolean() || System.nanoTime()>deadline) throw new InterruptedException("模型暂停或超时");
+                if(stopped.getAsBoolean()) throw new InterruptedException("模型已暂停");
+                if(System.nanoTime()>deadline) throw new java.util.concurrent.TimeoutException("模型响应超时");
             }
             if(stopped.getAsBoolean()) throw new InterruptedException("模型已暂停");
-            if(process.exitValue()!=0 || !Files.isRegularFile(output)) throw new IllegalStateException("Codex未返回结果");
+            if(process.exitValue()!=0 || !Files.isRegularFile(output)) throw new ModelFailure(processFailure(readErrorTail(errors),process.exitValue()));
             if(Files.size(output)>100000) throw new IllegalStateException("模型结果过大");
             return Files.readString(output,StandardCharsets.UTF_8).trim();
         } finally {
@@ -98,10 +103,27 @@ public class InternshipModel {
                 process.descendants().forEach(ProcessHandle::destroyForcibly);process.destroyForcibly();
                 process.waitFor(5,TimeUnit.SECONDS);
             }
-            Files.deleteIfExists(schema); Files.deleteIfExists(output);
+            Files.deleteIfExists(schema); Files.deleteIfExists(output); Files.deleteIfExists(errors);
             // Only remove our empty run directory; never recursively delete arbitrary model output.
             try { Files.deleteIfExists(run); } catch(DirectoryNotEmptyException ignored) {}
         }
+    }
+    private static class ModelFailure extends IllegalStateException { ModelFailure(String message){super(message);} }
+    static String readErrorTail(Path errors) throws java.io.IOException {
+        if(!Files.isRegularFile(errors))return "";
+        try(var input=Files.newInputStream(errors)) {
+            input.skipNBytes(Math.max(0,Files.size(errors)-16384));
+            return new String(input.readNBytes(16384),StandardCharsets.UTF_8);
+        }
+    }
+    /** Return only controlled messages, never stderr containing prompts, credentials or local paths. */
+    static String processFailure(String detail,int exit) {
+        String text=detail.toLowerCase(java.util.Locale.ROOT);
+        if(text.matches("(?s).*(usage limit|rate.limit|quota|too many requests|\\b429\\b).*"))return "模型额度或请求频率已达上限，请等待恢复";
+        if(text.matches("(?s).*(unauthorized|not logged in|authentication|token expired|refresh.token|\\b401\\b).*"))return "模型登录失效，请重新登录Codex";
+        if(text.matches("(?s).*(unsupported model|model.not.found|model[^\\n]*does not exist|invalid[^\\n]*service.tier).*"))return "模型或Fast参数不可用，请检查模型配置";
+        if(text.matches("(?s).*(stream disconnected|connection|tls|dns|timed out|network|unexpected.eof|\\b50[234]\\b).*"))return "模型网络连接中断，请检查网络或代理后重试";
+        return "模型程序未返回有效结果（退出码"+exit+"），未执行投递";
     }
     static JSONObject schema() {
         JSONObject properties=new JSONObject();

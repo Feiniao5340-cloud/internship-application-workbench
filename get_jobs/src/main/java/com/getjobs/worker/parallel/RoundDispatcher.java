@@ -49,6 +49,8 @@ public class RoundDispatcher {
             JSONObject job=active.getJSONObject(p),outcome=workers.get(p).outcome(job);
             job.put("finishedAt",clock.instant().toString()).put("outcome",outcome).put("status",outcome.optBoolean("failed")?"failed":"finished");
             s.getJSONArray("completed").put(job);active.remove(p);
+            if(outcome.optBoolean("failed"))queueRetry(s,job,day,now);
+            else if(job.optInt("retryAttempt")==1)repository.event(p,job.getString("id"),"retry_succeeded","自动重试一次已完成；平台恢复定时运行");
         }
         if(!s.optString("day").equals(day)) {
             JSONArray retained=new JSONArray();
@@ -79,7 +81,7 @@ public class RoundDispatcher {
                 s.getJSONArray("completed").put(job);pending.remove(i);continue;
             }
             boolean expired=!clock.instant().isBefore(Instant.parse(job.getString("deadline")))||(!job.optBoolean("manual")&&now.getHour()>=17);
-            if(expired||!blocked.isBlank()) {
+            if(expired||!blocked.isBlank()&&job.optInt("retryAttempt")!=1) {
                 job.put("status",expired?"expired":"skipped").put("message",expired?"时段已过，未补跑":blocked).put("finishedAt",clock.instant().toString());s.getJSONArray("completed").put(job);pending.remove(i);
                 if(expired&&(job.optBoolean("manual")||now.getHour()<17))repository.event(platform,job.getString("id"),"round_expired","排队时段已过，未运行；请检查平台耗时与并发容量");
                 continue;
@@ -95,9 +97,22 @@ public class RoundDispatcher {
             save(s);
             try{workers.get(platform).start(job);}
             catch(Exception e){active.remove(platform);job.put("status","failed").put("message",e.getMessage());s.getJSONArray("completed").put(job);repository.event(platform,job.getString("id"),"round_failed",e.getMessage());
-                JSONObject config=repository.document(platform,"config");config.put("holdDate",day).put("holdReason",e.getMessage());repository.document(platform,"config",config);}
+                JSONObject config=repository.document(platform,"config");config.put("holdDate",day).put("holdReason",e.getMessage());repository.document(platform,"config",config);queueRetry(s,job,day,now);}
         }
         save(s);
+    }
+    private void queueRetry(JSONObject s,JSONObject failed,String day,ZonedDateTime now) {
+        String platform=failed.getString("platform"),reason=workers.get(platform).blocked(day);
+        if(failed.optInt("retryAttempt")>0){repository.event(platform,failed.getString("id"),"retry_failed","自动重试一次仍失败；该平台已暂停："+failed.optString("message",failed.optJSONObject("outcome")==null?reason:failed.getJSONObject("outcome").optString("message")));return;}
+        if(!s.optBoolean("enabled")||!enabled.test(platform)||now.getHour()<7||now.getHour()>=17||reason.contains("上限")||reason.contains("用户手动暂停")||reason.contains("暂停请求"))return;
+        Instant until=Instant.parse(failed.optString("slotDeadline",failed.getString("deadline")));
+        if(!clock.instant().isBefore(until))return;
+        String id=failed.getString("id")+"|retry-1";
+        JSONObject retry=new JSONObject().put("id",id).put("retryOf",failed.getString("id")).put("retryAttempt",1).put("platform",platform).put("source",failed.getString("source")).put("triggeredAt",clock.instant().toString()).put("deadline",until.toString());
+        if(failed.optJSONObject("outcome")!=null&&failed.getJSONObject("outcome").optJSONObject("summary")!=null)retry.put("retryRoundId",failed.getJSONObject("outcome").getJSONObject("summary").optString("id"));
+        s.getJSONArray("pending").put(retry);
+        // Persist the single retry before notification or any new browser action.
+        save(s);repository.event(platform,id,"retry_started","本轮异常，已安排自动重试一次；未确认的发送只核对回执，不重复发送。原因："+reason);
     }
     public synchronized void pausePlatform(String platform) {
         workers.get(platform).stop();JSONObject s=state();JSONArray pending=s.getJSONArray("pending");for(int i=pending.length()-1;i>=0;i--)if(pending.getJSONObject(i).getString("platform").equals(platform))pending.remove(i);save(s);

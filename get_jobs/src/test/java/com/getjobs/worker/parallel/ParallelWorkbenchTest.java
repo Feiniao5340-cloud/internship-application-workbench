@@ -56,5 +56,33 @@ class ParallelWorkbenchTest {
         assertThrows(IllegalStateException.class,()->service.start("lagou","search"));assertThrows(IllegalStateException.class,()->service.checkSession("lagou"));assertThrows(IllegalStateException.class,()->service.deliver("lagou","old",true));
         assertEquals(4,((List<?>)service.status().get("platforms")).size());assertTrue(repo.document("lagou","historical").getBoolean("retained"));
     }
+    @Test void manualBrowserBlocksRoundsUntilExplicitReturnWithoutClearingExistingHolds(){
+        var worker=service.worker("zhilian");ReflectionTestUtils.setField(service,"live",true);
+        ReflectionTestUtils.setField(worker,"live",true);
+        ReflectionTestUtils.setField(worker,"manualBrowser",true);
+        assertTrue(worker.blocked("2026-10-20").contains("人工处理"));
+        assertThrows(IllegalStateException.class,()->worker.start(new JSONObject().put("source","recommend")));
+        verify(worker.browser,never()).setHeadlessMode(true);
+        ReflectionTestUtils.setField(worker,"manualBrowser",false);
+        JSONObject c=worker.config().put("holdDate","2026-10-20").put("holdReason","existing model failure");repo.document("zhilian","config",c);
+        assertEquals("existing model failure",worker.blocked("2026-10-20"));
+    }
+    @Test void displayingBossForManualLoginDoesNotNavigateOrInspectItsPage() {
+        var worker=service.worker("boss");ReflectionTestUtils.setField(worker,"live",true);ReflectionTestUtils.setField(worker,"protect",false);
+        var page=mock(com.microsoft.playwright.Page.class);when(worker.browser.getBossPage()).thenReturn(page);
+        doAnswer(call->{java.util.concurrent.Callable<?> action=call.getArgument(0);return action.call();}).when(worker.browser).callOnPlaywright(any());
+        worker.reserveControl();var result=worker.checkReservedSession(true);
+        assertTrue(String.valueOf(result.get("message")).contains("未刷新"));verify(page).bringToFront();verifyNoMoreInteractions(page);
+        verify(worker.browser,never()).checkAndSaveBossSession();assertTrue(worker.blocked("2026-10-20").contains("人工处理"));
+    }
+    @Test void onlyAuthorizedPlatformCanUseBackgroundChrome() {
+        for(String id:List.of("boss","job51","shixiseng","zhilian")){service.saveConfig(id,new JSONObject().put("browserMode","background"));assertTrue(service.worker(id).backgroundBrowser());}
+        assertThrows(IllegalArgumentException.class,()->service.saveConfig("lagou",new JSONObject().put("browserMode","background")));
+        service.saveConfig("job51",new JSONObject().put("browserMode","background"));
+        assertTrue(service.worker("job51").backgroundBrowser());assertTrue(service.worker("shixiseng").backgroundBrowser());
+        service.saveConfig("boss",new JSONObject().put("browserMode","background"));assertTrue(service.worker("boss").backgroundBrowser());
+        assertEquals("background",service.worker("job51").status().get("browserMode"));
+        assertThrows(IllegalArgumentException.class,()->service.saveConfig("job51",new JSONObject().put("browserMode","invalid")));
+    }
     @Test void processShutdownPreservesSavedScheduleButExplicitPauseDisablesIt(){service.enableSchedule(true);service.close();assertTrue(repo.document("_global","dispatch").getBoolean("enabled"));service.pauseAll();assertFalse(repo.document("_global","dispatch").getBoolean("enabled"));}
 }

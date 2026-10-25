@@ -1,4 +1,4 @@
-﻿param([switch]$NoBrowser,[switch]$NoSetup)
+﻿param([switch]$NoBrowser,[switch]$NoSetup,[switch]$FromGuard)
 $ErrorActionPreference='Stop'
 $env:PSModulePath=(Join-Path $PSHOME 'Modules')+';'+$env:PSModulePath
 function Read-State($Port){try{$r=Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/api/v2/status" -TimeoutSec 3;[Text.Encoding]::UTF8.GetString($r.RawContentStream.ToArray())|ConvertFrom-Json}catch{return $null}}
@@ -15,6 +15,9 @@ function Find-Codex {
     return ''
 }
 $root=[IO.Path]::GetFullPath($PSScriptRoot);$config=Join-Path $root 'config/launcher.json'
+$stopMarker=Join-Path $root 'config/manual-stop.flag'
+if($FromGuard -and (Test-Path -LiteralPath $stopMarker)){Write-Output '用户已明确停止工作台，未自动恢复。';return}
+if(!$FromGuard -and (Test-Path -LiteralPath $stopMarker)){Remove-Item -LiteralPath $stopMarker}
 if(!(Test-Path -LiteralPath $config)){if($NoSetup){throw '尚未完成首次配置，请双击“配置模型”。'};& (Join-Path $root '配置模型.ps1')}
 $c=Get-Content -LiteralPath $config -Raw -Encoding UTF8|ConvertFrom-Json
 $port=[int]$c.port;if($port -lt 1024 -or $port -gt 65535 -or $port -in @(9527,9537)){throw '端口配置无效或保留给现有工作台，请使用9567等其他端口。'}
@@ -42,7 +45,8 @@ try{
     try{
         $env:PLAYWRIGHT_NODEJS_PATH=$node;$env:WORKBENCH_API_KEY='';$env:WORKBENCH_API_BASE='';$env:WORKBENCH_API_MODEL=''
         if($c.provider -eq 'api'){$secure=ConvertTo-SecureString $c.encryptedApiKey;$credential=New-Object Net.NetworkCredential('', $secure);$env:WORKBENCH_API_KEY=$credential.Password;$env:WORKBENCH_API_BASE=$c.apiBase;$env:WORKBENCH_API_MODEL=$c.model}
-        $process=Start-Process -FilePath $java -ArgumentList $arguments -WorkingDirectory (Join-Path $root 'app') -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $root 'logs/service.log') -RedirectStandardError (Join-Path $root 'logs/error.log')
+        $stamp=[DateTime]::Now.ToString('yyyyMMdd-HHmmss-fff')
+        $process=Start-Process -FilePath $java -ArgumentList $arguments -WorkingDirectory (Join-Path $root 'app') -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $root ('logs/service-'+$stamp+'.log')) -RedirectStandardError (Join-Path $root ('logs/error-'+$stamp+'.log'))
     }finally{foreach($name in $envNames){[Environment]::SetEnvironmentVariable($name,$saved[$name],'Process')}}
     @{pid=$process.Id;startedAt=$process.StartTime.ToUniversalTime().ToString('o');root=$root;port=$port}|ConvertTo-Json|Set-Content -LiteralPath $registry -Encoding UTF8
     $until=[DateTime]::UtcNow.AddSeconds(60);$state=$null

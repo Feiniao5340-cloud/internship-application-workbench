@@ -28,6 +28,7 @@ public class ParallelController {
     @PostMapping("/pause-all") public Object pauseAll(){workbench.pauseAll();return Map.of("paused",true);}
     @PutMapping("/schedule") public Object schedule(@RequestBody String body){workbench.enableSchedule(new JSONObject(body).getBoolean("enabled"));return workbench.status();}
     @PostMapping("/platforms/{id}/session") public Object session(@PathVariable String id){return workbench.checkSession(id);}
+    @PostMapping("/platforms/{id}/browser-display") public Object browserDisplay(@PathVariable String id,@RequestBody String body){return workbench.browserDisplay(id,new JSONObject(body).getBoolean("visible"));}
     @GetMapping("/platforms/{id}/diagnostic") public Object diagnostic(@PathVariable String id,@RequestParam(required=false)String url){return workbench.diagnostic(id,url);}
     @GetMapping("/platforms/{id}/records") public String records(@PathVariable String id,@RequestParam(required=false)String round){return workbench.records(id,round).toString();}
     @GetMapping("/rounds") public String rounds(@RequestParam(required=false)String platform){return workbench.rounds(platform).toString();}

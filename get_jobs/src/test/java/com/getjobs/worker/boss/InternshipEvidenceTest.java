@@ -10,6 +10,23 @@ import static org.mockito.Mockito.*;
 class InternshipEvidenceTest {
     @TempDir Path directory;
     InternshipFlowTest fixture=new InternshipFlowTest();
+    @Test void evidenceIdsRestoreExactPunctuationWithoutWeakeningQuoteValidation() {
+        var c=fixture.profile();var j=fixture.job().put("jd","负责需求分析；\n负责PRD编写。实习生。");
+        var answer=fixture.answer("review").put("jdEvidence",new JSONArray().put("jd:0001")).put("resumeEvidence",new JSONArray().put("resume:0001"));
+        var r=InternshipPolicy.evaluate(c,j,answer.toString());
+        assertFalse(r.optBoolean("pendingModel"));assertEquals("负责需求分析；",r.getJSONArray("jdEvidence").getString(0));
+        assertTrue(c.getString("resumeText").contains(r.getJSONArray("resumeEvidence").getString(0)));
+        assertTrue(r.getBoolean("evidenceResolvedById"));
+        answer.put("jdEvidence",new JSONArray().put("负责需求分析。"));
+        assertTrue(InternshipPolicy.evaluate(c,j,answer.toString()).getBoolean("pendingModel"));
+    }
+    @Test void fabricatedAndCrossSourceIdsStayBlocked() {
+        var c=fixture.profile();var j=fixture.job();
+        for(String invalid:new String[]{"jd:9999","resume:0001"}) {
+            var answer=fixture.answer("review").put("jdEvidence",new JSONArray().put(invalid));
+            assertTrue(InternshipPolicy.evaluate(c,j,answer.toString()).getBoolean("pendingModel"));
+        }
+    }
     @Test void formattingNormalizationReturnsActualOriginalSpan() {
         String original="【Ａ Ｉ应用】熟悉RAG\n知识库，编写ＰＲＤ。";
         assertEquals("【Ａ Ｉ应用】",InternshipPolicy.evidenceQuote(original,"【AI应用】"));

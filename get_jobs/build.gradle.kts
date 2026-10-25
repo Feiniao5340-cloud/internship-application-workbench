@@ -10,7 +10,7 @@ plugins {
 }
 
 group = "com.getjobs"
-version = "2.1.0-preview.1"
+version = "2.1.0"
 
 java {
     toolchain { languageVersion.set(JavaLanguageVersion.of(21)) }
@@ -36,6 +36,7 @@ dependencies {
     // 1.62.0 是为了和 patchright-core 1.62.1 对齐（见 installPatchrightDriver 任务）。
     // 不要降到 1.51：patchright-core 1.51.3 的 locator.count() 是坏的（_progress is not defined）
     implementation("com.microsoft.playwright:playwright:1.62.0")
+    implementation(files("third-party/jna/jna-5.17.0.jar"))
     implementation("com.baomidou:mybatis-plus-spring-boot3-starter:3.5.9")
     implementation("org.xerial:sqlite-jdbc:3.45.1.0")
     // 代码生成器（MyBatis-Plus Generator + Freemarker 模板）

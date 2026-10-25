@@ -122,13 +122,56 @@ public class PlaywrightManager {
     private Path USER_DATA_DIR = Paths.get(System.getProperty("user.dir"), "browser-data");
     private String isolatedPlatform="boss";
     private boolean protectProductionAccounts;
+    private volatile boolean headlessMode;
+    private volatile boolean backgroundMode;
+    private BackgroundChromeWindows backgroundWindows;
+    private List<Cookie> displaySwitchCookies=List.of();
+
+    public boolean isHeadlessMode() { return headlessMode; }
+
+    /** Only an idle platform owner may switch display mode. No automatic headed fallback. */
+    public void setHeadlessMode(boolean headless) {
+        runOnPlaywright(() -> {
+            if (headlessMode == headless) return;
+            if(backgroundWindows!=null){backgroundWindows.close();backgroundWindows=null;}
+            if (context != null && !browserClosed) displaySwitchCookies=List.copyOf(context.cookies());
+            if (context != null) context.close();
+            if (playwright != null) playwright.close();
+            context = null; playwright = null;
+            bossPage = null; liepinPage = null; job51Page = null; zhilianPage = null;
+            browserClosed = true;
+            loginStatus.clear();
+            headlessMode = headless;
+        });
+    }
+
+    public void setBackgroundMode(boolean background) {
+        runOnPlaywright(()->{
+            if(backgroundMode==background)return;
+            if(backgroundWindows!=null){backgroundWindows.showAndClose();backgroundWindows=null;}
+            backgroundMode=background;
+            if(background&&!headlessMode&&isInitialized())backgroundWindows=BackgroundChromeWindows.start(context,BackgroundChromeWindows.currentForeground());
+        });
+    }
+
+    BrowserType.LaunchPersistentContextOptions browserLaunchOptions() {
+        var options = new BrowserType.LaunchPersistentContextOptions()
+                .setChannel(internshipBrowserExecutable.isBlank() ? "chrome" : null)
+                .setExecutablePath(internshipBrowserExecutable.isBlank() ? null : Path.of(internshipBrowserExecutable))
+                .setHeadless(headlessMode).setSlowMo(50).setChromiumSandbox(true)
+                .setArgs(List.of("--test-type", "--disable-session-crashed-bubble",
+                        "--hide-crash-restore-bubble", "--no-first-run", "--no-default-browser-check",
+                        "--no-proxy-server", "--proxy-bypass-list=*", "--disable-blink-features=AutomationControlled"));
+                if(backgroundMode){var args=new ArrayList<>(options.args);args.add("--window-position=-32000,-32000");args.add("--window-size=1440,1000");options.setArgs(args);}
+        return headlessMode||backgroundMode ? options.setViewportSize(1440, 1000) : options.setViewportSize(null);
+    }
 
     public PlaywrightManager isolated(String platform, Path profile, boolean enabled, boolean protect) {
         PlaywrightManager fork=new PlaywrightManager();
         fork.isolatedPlatform=platform;fork.USER_DATA_DIR=profile.toAbsolutePath().normalize();
         fork.internshipBrowserEnabled=enabled;fork.internshipBossOnly=true;
         fork.internshipBrowserExecutable=internshipBrowserExecutable;
-        fork.cookieService=cookieService;fork.protectProductionAccounts=protect;
+        fork.cookieService=cookieService;fork.protectProductionAccounts=protect;fork.headlessMode=true;
         return fork;
     }
 
@@ -324,35 +367,13 @@ public class PlaywrightManager {
 
             // 用持久化上下文启动：Patchright 官方明确要求用 launchPersistentContext，
             // 而不是 launch() + newContext()。登录态直接落盘到 USER_DATA_DIR。
-            context = playwright.chromium().launchPersistentContext(USER_DATA_DIR,
-                    new BrowserType.LaunchPersistentContextOptions()
-                            .setChannel(internshipBrowserExecutable.isBlank() ? "chrome" : null)
-                            .setExecutablePath(internshipBrowserExecutable.isBlank() ? null : Path.of(internshipBrowserExecutable))
-                            .setHeadless(false)     // 无头必被检测
-                            .setSlowMo(50)          // 放慢操作速度，便于调试
-                            .setViewportSize(null)  // 不锁视口，用窗口实际大小
-                            .setChromiumSandbox(true) // 不加 --no-sandbox：它本身就是自动化特征
-                            .setArgs(List.of(
-                                    "--start-maximized",
-                                    // Patchright 会加 --disable-blink-features=AutomationControlled，
-                                    // Chrome 因此弹"不受支持的命令行标记"黄条，用 --test-type 抑制
-                                    "--test-type",
-                                    // 上次非正常退出（IDEA 停止按钮、崩溃、kill）后，Chrome 会弹
-                                    // "要恢复页面吗？"模态框。那个框会挂起所有 CDP 页面操作，
-                                    // 表现为 navigate 永远不返回、连超时都不触发，整个初始化焊死。
-                                    "--disable-session-crashed-bubble",
-                                    "--hide-crash-restore-bubble",
-                                    "--no-first-run",
-                                    "--no-default-browser-check",
-                                    // 强制直连，不走系统代理（代理出口 IP 更容易被风控标记）
-                                    "--no-proxy-server",
-                                    "--proxy-bypass-list=*",
-                                    // 把 navigator.webdriver 压成 false。
-                                    // patchright 的 driver 会自动加这个标志，但它的超时机制是坏的
-                                    // （navigate/isVisible/waitForLoadState 的 timeout 全部失效，
-                                    // 会把线程无限期挂死）；用官方 driver 就得自己加。
-                                    "--disable-blink-features=AutomationControlled"
-                            )));
+            long foreground=backgroundMode?BackgroundChromeWindows.currentForeground():0;
+            context = playwright.chromium().launchPersistentContext(USER_DATA_DIR, browserLaunchOptions());
+            if(backgroundMode&&!headlessMode)backgroundWindows=BackgroundChromeWindows.start(context,foreground);
+            if (!displaySwitchCookies.isEmpty()) {
+                context.addCookies(displaySwitchCookies);
+                displaySwitchCookies=List.of();
+            }
             // 刻意不设置 UserAgent：伪造 UA 只改字符串，改不了 navigator.platform 和
             // navigator.userAgentData，反而制造出"UA 说 Mac、platform 说 Win32"这种致命矛盾。
             browserClosed = false;
@@ -375,14 +396,14 @@ public class PlaywrightManager {
             // 同一个浏览器里新开的标签页则完全正常，所以这里一律新建，最后把启动页关掉。
             List<Page> startupPages = new ArrayList<>(context.pages());
 
-            bossPage = context.newPage();
+            bossPage = backgroundMode ? BackgroundBrowserPages.create(context) : context.newPage();
             bossPage.setDefaultTimeout(DEFAULT_TIMEOUT);
             log.info("✓ Boss Page已创建");
             if(!isolatedPlatform.equals("boss")) {
                 String home=switch(isolatedPlatform) {
                     case "shixiseng" -> "https://www.shixiseng.com/";
                     case "zhilian" -> "https://www.zhaopin.com/";
-                    case "job51" -> "https://www.51job.com/";
+                    case "job51" -> "https://q.yingjiesheng.com/pc/searchintention";
                     case "lagou" -> "https://www.lagou.com/";
                     default -> throw new IllegalArgumentException("未知平台");
                 };
@@ -431,7 +452,12 @@ public class PlaywrightManager {
             log.info("========================================");
         } catch (Exception e) {
             log.error("✗ 浏览器自动化引擎初始化失败", e);
-            throw new RuntimeException("Playwright初始化失败", e);
+            if(backgroundWindows!=null){backgroundWindows.close();backgroundWindows=null;}
+            browserClosed = true;
+            try { if (context != null) context.close(); } catch (Exception ignored) {}
+            try { if (playwright != null) playwright.close(); } catch (Exception ignored) {}
+            context = null; playwright = null; bossPage = null;
+            throw new RuntimeException(headlessMode ? "无界面浏览器初始化失败，未切换普通Chrome：" + e.getMessage() : "Playwright初始化失败", e);
         }
     }
 
@@ -1764,7 +1790,7 @@ public class PlaywrightManager {
     public String getBossSessionSavedAt() { return bossSessionSavedAt; }
     /** Call on the Playwright thread. Never exposes session credentials. */
     public Map<String,Object> checkAndSaveBossSession() {
-        bossPage.bringToFront();
+        if(!backgroundMode)bossPage.bringToFront();
         bossPage.navigate(BOSS_ENTRY_URL,new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED).setTimeout(30000));
         boolean loggedIn=false;
         for(int i=0;i<20;i++) {
@@ -1857,6 +1883,7 @@ public class PlaywrightManager {
      */
     @PreDestroy
     public void destroy() {
+        if(backgroundWindows!=null){backgroundWindows.close();backgroundWindows=null;}
         log.info("开始关闭Playwright管理器...");
 
         try {
@@ -1910,10 +1937,12 @@ public class PlaywrightManager {
      * 发起任务前先过一遍这里。
      */
     public synchronized void ensureReady() {
+        if(backgroundWindows!=null&&isInitialized())backgroundWindows.ensureHealthy();
         if (isInitialized()) {
             return;
         }
         log.warn("浏览器不可用（已关闭或未初始化），正在重新初始化...");
+        if(backgroundWindows!=null){backgroundWindows.close();backgroundWindows=null;}
         // 旧对象已经失效，先清干净再重建，避免 init() 里的 isInitialized() 短路
         try {
             if (playwright != null) {

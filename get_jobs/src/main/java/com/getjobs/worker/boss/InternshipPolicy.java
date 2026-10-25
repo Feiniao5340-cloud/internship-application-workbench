@@ -89,12 +89,16 @@ public final class InternshipPolicy {
                 未知技能和缺少的相关经历不能当作满足，不因为行业或岗位名称相近就给高分；理由说明主要匹配及缺口并引用双方原文。
                 返回一个 JSON，字段为 decision(apply/skip/review)、category、confidence(0到1)、matchScore(0到100整数)、reason、
                 jdEvidence(从JD全文逐字引用的非空文本数组)、resumeEvidence(从简历逐字引用的文本数组)、
-                jdEvidence只能引用岗位JSON的jd字段中的连续原文；salary、city、title等元数据不能填入jdEvidence。
+                jdEvidence优先填写下方岗位证据表中的编号（如jd:0001）；resumeEvidence优先填写简历证据表编号（如resume:0001）。
+                程序会按编号恢复连续原文。不得跨表使用编号或编造编号；选择最能支持判断的少量片段。
+                若直接填写文本，jdEvidence只能引用岗位JSON的jd字段中的连续原文；salary、city、title等元数据不能填入jdEvidence。
                 resumeEvidence只能引用resumeText字段的连续原文，保留原有数字、标点和用词，不得改写或概括。
                 unknowns(文本数组)、constraintViolations(文本数组)。apply必须有简历依据且无未知或违约。
                 不生成招呼语。只返回JSON，不使用Markdown。
                 用户资料：
-                """ + profile.toString() + "\n岗位：\n" + job.toString();
+                """ + profile.toString() + "\n岗位：\n" + job.toString()
+                + "\n岗位证据表：\n" + evidenceCatalog(job.optString("jd"),"jd:")
+                + "\n简历证据表：\n" + evidenceCatalog(profile.optString("resumeText"),"resume:");
     }
 
     public static JSONObject evaluate(JSONObject c, JSONObject j, String answer) {
@@ -146,9 +150,12 @@ public final class InternshipPolicy {
             if (r.getJSONArray("jdEvidence").isEmpty()) return review("没有岗位原文依据").put("pendingModel",true);
             for(String field:java.util.List.of("jdEvidence","resumeEvidence")) {
                 String source=field.equals("jdEvidence")?j.getString("jd"):c.getString("resumeText");
+                JSONObject catalog=evidenceCatalog(source,field.equals("jdEvidence")?"jd:":"resume:");
                 JSONArray quotes=r.getJSONArray(field);
                 for(int i=0;i<quotes.length();i++) {
-                    String quote=quotes.getString(i),original=evidenceQuote(source,quote);
+                    String quote=quotes.getString(i);
+                    if(catalog.has(quote)){quote=catalog.getString(quote);r.put("evidenceResolvedById",true);}
+                    String original=evidenceQuote(source,quote);
                     if(original==null)return review(field.equals("jdEvidence")?"岗位证据不在原文中":"简历证据不在原文中")
                         .put("pendingModel",true).put("validationFailure",new JSONObject().put("field",field).put("quote",quote));
                     if(!original.equals(quote))r.put("evidenceFormattingNormalized",true);
@@ -160,6 +167,15 @@ public final class InternshipPolicy {
                     || confidence < c.getDouble("minConfidence"))) return review("匹配依据不足、条件未确定或置信度不足").put("matchScore",(int)score).put("modelResult", r);
             return r;
         } catch (Exception e) { return review("模型请求失败或JSON不符合约定").put("pendingModel",true); }
+    }
+
+    static JSONObject evidenceCatalog(String source,String prefix) {
+        JSONObject catalog=new JSONObject();int number=1;
+        for(String span:source.split("(?<=\\n)|(?<=[。；;！？!?])")) {
+            String quote=span.strip();if(quote.isBlank())continue;
+            catalog.put(prefix+String.format(java.util.Locale.ROOT,"%04d",number++),quote);
+        }
+        return catalog;
     }
 
     /** Formatting compatibility only: keep words, punctuation, numbers and negation intact.

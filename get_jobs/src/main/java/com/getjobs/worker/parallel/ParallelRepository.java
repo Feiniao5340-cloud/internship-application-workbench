@@ -101,9 +101,9 @@ public class ParallelRepository {
         try(Connection c=open();PreparedStatement p=c.prepareStatement("INSERT INTO events VALUES(?,?,?,?,?,?)")) {
             p.setString(1,id);p.setString(2,platform);p.setString(3,round);p.setString(4,type);p.setString(5,message);p.setString(6,at);p.executeUpdate();
         }catch(SQLException e){throw new IllegalStateException("事件保存失败",e);}
-        if(Set.of("round_failed","round_expired","daily_limit","manual_delivery_failed").contains(type)) {
+        if(Set.of("round_failed","round_expired","daily_limit","manual_delivery_failed","retry_started","retry_succeeded","retry_failed").contains(type)) {
             JSONObject event=new JSONObject().put("id",id).put("type",type).put("round",round).put("platform",platform)
-                    .put("message",message).put("time",at).put("paused",!type.equals("round_expired"));
+                    .put("message",message).put("time",at).put("paused",!Set.of("round_expired","retry_started","retry_succeeded").contains(type));
             try{notification.accept(event);}catch(RuntimeException e){org.slf4j.LoggerFactory.getLogger(getClass()).error("开发版桌面通知失败，事件已保存：{}",id,e);}
         }
     }

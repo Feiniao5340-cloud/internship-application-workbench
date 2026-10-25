@@ -40,6 +40,21 @@ class InternshipNativeSitesTest {
         page.navigate(url("zhilian"));var store=new InternshipStore(directory);var adapter=new InternshipNativeSites(store,"zhilian",()->new JSONObject().put("resumeReady",true));var entry=new JSONObject().put("status","screened").put("job",adapter.readJob(page,url("zhilian")));store.save("job",entry);
         assertTrue(adapter.deliver(new JSONObject(),"job",entry,page,()->false));assertEquals("complete",store.get("job").getString("status"));assertEquals("zhilian-chat-attachment",store.get("job").getString("nativeReceiptSource"));assertNull(page.evaluate("sessionStorage.resent"));
     }
+    @Test void campusDisabledAppliedControlIsVerifiedWithoutClicking() {
+        route(html("zhilian",true,"测试公司"));page.navigate(url("zhilian"));var store=new InternshipStore(directory);var adapter=new InternshipNativeSites(store,"zhilian",JSONObject::new);
+        var entry=new JSONObject().put("status","native_attempted").put("job",adapter.readJob(page,url("zhilian")));store.save("job",entry);
+        route(html("zhilian",true,"测试公司").replace("立即投递","已投递").replace("<button onclick=","<div class='job-banner__deliver__btn job-banner__deliver__btn--disabled' onclick=").replace("</button>","</div>"));
+        assertEquals(false,((Map<?,?>)adapter.verifyExistingReceipt("job",entry,page,url("zhilian"))).get("newSubmission"));assertEquals("complete",store.get("job").getString("status"));assertNull(page.evaluate("sessionStorage.submitted"));
+    }
+    @Test void unselectedMatchingChatCanBeReadWithoutSendingAndAmbiguousOrWrongRowsAreNotClicked() {
+        route(html("zhilian",true,"测试公司"));page.navigate(url("zhilian"));var store=new InternshipStore(directory);var adapter=new InternshipNativeSites(store,"zhilian",JSONObject::new);
+        var job=adapter.readJob(page,url("zhilian"));var entry=new JSONObject().put("status","native_attempted").put("job",job);store.save("job",entry);
+        String row=chatHtml("测试公司").replace("<span class='im-session-item__salary'>","<span class='im-session-item__salary' style='display:none'>").replace("sessionStorage.resent","localStorage.resent").replace("im-session-item is-active","im-session-item").replace("<div class='im-session-item'>","<div class='im-session-item' onclick=\"localStorage.selected='1';this.classList.add('is-active')\">");
+        route(row.replace("测试公司","另一公司"));page.navigate("https://i.zhaopin.com/im");assertFalse(adapter.selectReceiptConversation(page,job));assertNull(page.evaluate("localStorage.selected"));
+        route(row+row);page.reload();assertFalse(adapter.selectReceiptConversation(page,job));assertNull(page.evaluate("localStorage.selected"));
+        route(row);assertEquals(true,((Map<?,?>)adapter.verifyExistingReceipt("job",entry,page,"https://i.zhaopin.com/im")).get("confirmed"));
+        assertEquals("complete",store.get("job").getString("status"));assertEquals("1",page.evaluate("localStorage.selected"));assertNull(page.evaluate("localStorage.resent"));
+    }
     @Test void persistedChatReceiptCanResolveUncertainSubmissionWithoutClickingOrAcceptingWrongConversation(){
         route(html("zhilian",true,"测试公司"));page.navigate(url("zhilian"));var store=new InternshipStore(directory);var adapter=new InternshipNativeSites(store,"zhilian",JSONObject::new);var job=adapter.readJob(page,url("zhilian"));var entry=new JSONObject().put("status","native_attempted").put("job",job);store.save("job",entry);
         for(String body:List.of(chatHtml("另一公司"),chatHtml("测试公司").replace("im-message__bubble--me","im-message__bubble--other"),chatHtml("测试公司").replace("已发送附件简历","新消息"),chatHtml("测试公司").replace("测试简历.pdf","发送中"))){route(body);page.navigate("https://i.zhaopin.com/im?sessionId=test");assertFalse(adapter.chatReceipt(page,job));}

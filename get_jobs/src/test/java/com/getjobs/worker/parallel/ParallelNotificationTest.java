@@ -29,4 +29,9 @@ class ParallelNotificationTest {
         repo.onEvent(event->{throw new IllegalStateException("desktop unavailable");});
         assertDoesNotThrow(()->repo.event("boss","slot","round_failed","失败"));assertEquals(1,repo.events().length());
     }
+    @Test void retryStartAndResultAreNotifiedWithAccuratePauseState() {
+        repo.event("job51","slot|retry-1","retry_started","网络中断，重试一次");assertFalse(notices.getLast().getBoolean("paused"));
+        repo.event("job51","slot|retry-1","retry_succeeded","重试完成");assertFalse(notices.getLast().getBoolean("paused"));
+        repo.event("job51","slot|retry-1","retry_failed","仍然断网，暂停");assertTrue(notices.getLast().getBoolean("paused"));assertEquals(3,notices.size());
+    }
 }

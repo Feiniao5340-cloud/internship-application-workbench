@@ -2,6 +2,7 @@ package com.getjobs.worker.boss;
 
 import com.getjobs.worker.parallel.Platforms;
 import com.microsoft.playwright.*;
+import com.getjobs.worker.manager.BackgroundBrowserPages;
 import org.json.*;
 import java.net.URI;
 import java.util.*;
@@ -10,11 +11,10 @@ import java.util.function.*;
 /** Separate adapter; the retired 51job delivery proof cannot authorize this site's submission. */
 public class InternshipYingjiesheng extends InternshipNativeSites {
     public static final String ADAPTER="yingjiesheng-intern-v1";
-    static final String SEARCH="https://q.yingjiesheng.com/jobs/search/?pageCode=internship%7Csearch%7Cjobsearchlb";
     private final InternshipStore store;
     private final Supplier<JSONObject> configuration;
     public InternshipYingjiesheng(InternshipStore store,Supplier<JSONObject> configuration){super(store,"job51",configuration);this.store=store;this.configuration=configuration;}
-    @Override public Map<String,Object> checkSession(Page page){page.navigate(Platforms.home("job51"));page.bringToFront();for(int n=0;n<30&&!loggedIn(page);n++)page.waitForTimeout(200);try{check(page);}catch(Attention e){return Map.of("loggedIn",false,"requiresUserAction",true,"message",e.getMessage(),"persistent",true);}boolean ready=loggedIn(page);return Map.of("loggedIn",ready,"message",ready?"已识别应届生登录态":"请在独立Chrome手动登录应届生，再检查登录态","persistent",true,"adapter",ADAPTER);}
+    @Override public Map<String,Object> checkSession(Page page){page.navigate(Platforms.home("job51"));for(int n=0;n<30&&!loggedIn(page);n++)page.waitForTimeout(200);try{check(page);}catch(Attention e){return Map.of("loggedIn",false,"requiresUserAction",true,"message",e.getMessage(),"persistent",true);}boolean ready=loggedIn(page);return Map.of("loggedIn",ready,"message",ready?"已识别应届生登录态":"请在独立Chrome手动登录应届生，再检查登录态","persistent",true,"adapter",ADAPTER);}
     @Override public Map<String,Object> diagnostic(Page page){
         URI u=URI.create(page.url().split("[?#]",2)[0]);if(!"q.yingjiesheng.com".equals(u.getHost()))return Map.of("message","请打开应届生实习入口","loggedIn",false);
         Map<String,Object> r=new LinkedHashMap<>();r.put("url",page.url());r.put("title",page.title());r.put("pageText",first(page,"body"));
@@ -45,6 +45,11 @@ public class InternshipYingjiesheng extends InternshipNativeSites {
     private boolean empty(Page p){return first(p,"body").matches("(?s).*(暂无相关职位|暂无职位|暂无符合条件的职位|没有找到相关).*" );}
     private void awaitListings(Page p){for(int n=0;n<60&&p.locator("a.search-list-href").count()==0&&!empty(p);n++)p.waitForTimeout(200);check(p);}
     void search(Page p,String word){
+        if(p.locator(".search-top-input:visible #keywordInput:visible").count()==0){
+            var entries=p.locator(".search:visible").all().stream().filter(l->l.innerText().trim().equals("搜索")).toList();
+            if(entries.size()!=1)throw new IllegalStateException("应届生站内搜索入口未完整加载，未采集");
+            entries.getFirst().click();
+        }
         p.locator(".search-top-input:visible #keywordInput").first().waitFor(new Locator.WaitForOptions().setTimeout(12000));
         var forms=p.locator(".search-top-input:visible").all().stream().filter(f->f.locator("#keywordInput:visible").count()==1&&f.locator(".search-button:visible").count()==1).toList();
         if(forms.isEmpty())throw new IllegalStateException("应届生搜索栏未完整加载，未采集");
@@ -67,7 +72,9 @@ public class InternshipYingjiesheng extends InternshipNativeSites {
         Set<String> seen=new HashSet<>();int count=0,failures=0;boolean sawListing=false;
         List<String> words=c.getString("source").equals("recommend")?List.of(""):c.getJSONArray("keywords").toList().stream().map(Object::toString).toList();
         for(String word:words){
-            if(stopped.getAsBoolean())return;p.navigate(word.isEmpty()?Platforms.home("job51"):SEARCH);check(p);
+            // Direct navigation to the legacy search route can show only skeletons and no account header.
+            // Enter through the authenticated account page before opening its own search control.
+            if(stopped.getAsBoolean())return;p.navigate(Platforms.home("job51"));check(p);
             for(int n=0;n<30&&!loggedIn(p);n++)p.waitForTimeout(200);if(!loggedIn(p))throw new Attention("应届生需要先核对登录态，未将公共岗位冒充账号推荐");
             if(!word.isEmpty()){
                 search(p,word);
@@ -80,12 +87,12 @@ public class InternshipYingjiesheng extends InternshipNativeSites {
                     String text=card.innerText(),title=text.split("\\R",2)[0].trim(),salary=firstIn(card,".right-salary");
                     if(!InternshipPolicy.formalReason(new JSONObject().put("title",title).put("salary",salary).put("cardText",text)).isBlank()){store.excludeFormalListing();continue;}
                     if(store.blocksRetry(store.get(InternshipPolicy.hash(url))))continue;
-                    Page detail=p.context().newPage();detail.setDefaultTimeout(8000);detail.setDefaultNavigationTimeout(25000);boolean attention=false;JSONObject job;
+                    Page detail=BackgroundBrowserPages.create(p.context());detail.setDefaultTimeout(8000);detail.setDefaultNavigationTimeout(25000);boolean attention=false;JSONObject job;
                     try{
                         detail.navigate(url,new Page.NavigateOptions().setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED));job=readJob(detail,url);
                         if(!job.getString("title").equals(title))throw new IllegalStateException("应届生详情名称与列表岗位不一致，已跳过");
                         if(!job.getString("employmentType").equals("实习")||!InternshipPolicy.formalReason(job).isBlank()){store.excludeFormalListing();continue;}
-                    }catch(Attention e){attention=true;detail.bringToFront();store.recordReadFailure(url,e.getMessage());throw e;}
+                    }catch(Attention e){attention=true;store.recordReadFailure(url,e.getMessage());throw e;}
                     catch(PlaywrightException|IllegalStateException e){failures++;store.recordReadFailure(url,e instanceof PlaywrightException?"应届生详情加载或字段读取超时":e.getMessage());continue;}
                     finally{if(!attention)detail.close();}
                     job.put("source",c.getString("source")).put("sourceKeyword",word);progress.accept("应届生实习：读取并评分第 "+(++count)+" 个候选 · "+title);accept.accept(job);
@@ -101,7 +108,7 @@ public class InternshipYingjiesheng extends InternshipNativeSites {
     }
     private static String firstIn(Locator card,String selector){Locator value=card.locator(selector);return value.count()==1?value.innerText().trim():"";}
     static String jobUrl(String url){try{URI u=URI.create(url.split("[?#]",2)[0]);return "https".equals(u.getScheme())&&"q.yingjiesheng.com".equals(u.getHost())&&u.getUserInfo()==null&&u.getPort()==-1&&u.getPath().matches("/jobdetail/\\d+\\.html")?"https://q.yingjiesheng.com"+u.getPath():"";}catch(Exception e){return "";}}
-    @Override public Object inspectDetail(Page p,String url){String target=jobUrl(url);if(target.isBlank()&&!Set.of(Platforms.home("job51"),"https://q.yingjiesheng.com/pc/searchintern","https://q.yingjiesheng.com/jobs/search/?pageCode=internship|search|jobsearchlb").contains(url))throw new IllegalArgumentException("只允许应届生实习入口和真实岗位详情");Page detail=p.context().newPage();try{detail.navigate(target.isBlank()?url:target);detail.waitForTimeout(1500);return diagnostic(detail);}finally{detail.close();}}
+    @Override public Object inspectDetail(Page p,String url){String target=jobUrl(url);if(target.isBlank()&&!Set.of(Platforms.home("job51"),"https://q.yingjiesheng.com/pc/searchintern","https://q.yingjiesheng.com/jobs/search/?pageCode=internship|search|jobsearchlb").contains(url))throw new IllegalArgumentException("只允许应届生实习入口和真实岗位详情");Page detail=BackgroundBrowserPages.create(p.context());try{detail.navigate(target.isBlank()?url:target);detail.waitForTimeout(1500);return diagnostic(detail);}finally{detail.close();}}
     boolean submitted(Page p){return p.locator(".detail-title-right .delivery-btn:visible").all().stream().anyMatch(l->l.innerText().trim().matches("已申请|已投递|申请成功|投递成功"));}
     @Override public boolean deliver(JSONObject c,String id,JSONObject entry,Page p,BooleanSupplier stopped){
         if(!configuration.get().optBoolean("resumeReady"))throw new IllegalStateException("应届生站内简历尚未核对，未提交");
@@ -117,7 +124,7 @@ public class InternshipYingjiesheng extends InternshipNativeSites {
         for(int n=0;n<60;n++){
             check(p);if(!url.equals(jobUrl(p.url())))throw new IllegalStateException("应届生申请转往其他页面，未确认投递成功，未重新申请");
             if(submitted(p)){
-                Page receipt=p.context().newPage();
+                Page receipt=BackgroundBrowserPages.create(p.context());
                 try{receipt.navigate(url);if(!loggedIn(receipt)||!same(job,readJob(receipt,url))||!submitted(receipt))throw new IllegalStateException("应届生申请状态未在重新打开岗位后保持，未确认投递成功");}
                 finally{receipt.close();}
                 entry.put("status","complete").put("nativeResumeConfirmed",true).put("nativeReceiptSource","yingjiesheng-job-applied-state").put("nativeReceiptAt",java.time.Instant.now().toString());store.save(id,entry);

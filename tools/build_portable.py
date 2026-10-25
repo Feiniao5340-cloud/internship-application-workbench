@@ -2,9 +2,9 @@
 import argparse,hashlib,json,shutil,subprocess,urllib.request,zipfile
 from pathlib import Path
 
-VERSION='2.1.0-preview.1'
+VERSION='2.1.0'
 ROOT=Path(__file__).resolve().parents[1]
-SCRIPTS=['配置模型.ps1','启动工作台.ps1','停止工作台.ps1','每日唤醒设置.ps1','显示投递异常通知.ps1']
+SCRIPTS=['配置模型.ps1','启动工作台.ps1','停止工作台.ps1','每日唤醒设置.ps1','显示投递异常通知.ps1','服务在线守护.ps1','生成投递日报.ps1']
 DOCS=['README.md','使用说明.md','PRIVACY.md','THIRD_PARTY.md','RELEASE_CHECKLIST.md','get_jobs/LICENSE']
 
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -15,6 +15,7 @@ def build(java_home,node,driver,output):
     for item in [java_home/'bin/jlink.exe',node,driver/'package/cli.js',jar]:
         if not item.is_file():raise ValueError('Missing dependency: '+str(item))
     output.mkdir(parents=True);(output/'app').mkdir();(output/'runtime').mkdir();(output/'runtime/node').mkdir()
+    (output/'scripts').mkdir();shutil.copy2(ROOT/'scripts/daily_report.py',output/'scripts/daily_report.py')
     shutil.copy2(jar,output/'app/workbench.jar');shutil.copy2(node,output/'runtime/node/node.exe')
     subprocess.run([str(java_home/'bin/jlink.exe'),'--module-path',str(java_home/'jmods'),'--add-modules','ALL-MODULE-PATH','--strip-debug','--no-header-files','--no-man-pages','--output',str(output/'runtime/java')],check=True)
     if (java_home/'NOTICE').is_file():shutil.copy2(java_home/'NOTICE',output/'runtime/java/NOTICE')

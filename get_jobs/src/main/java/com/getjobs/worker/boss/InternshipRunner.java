@@ -5,6 +5,7 @@ import com.getjobs.application.service.BossResumeImageService;
 import com.getjobs.application.service.ConfigService;
 import com.getjobs.worker.manager.PlaywrightManager;
 import com.microsoft.playwright.*;
+import com.getjobs.worker.manager.BackgroundBrowserPages;
 import org.json.*;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -48,7 +49,8 @@ public class InternshipRunner {
         return shouldStop() || scheduledDeadline!=null&&!clock.instant().isBefore(scheduledDeadline.minusSeconds(collectionReserveSeconds));
     }
     boolean sendWindowEnded() {
-        return shouldStop() || scheduledDeadline!=null&&!clock.instant().isBefore(scheduledDeadline.minusSeconds(sendReserveSeconds));
+        return shouldStop() || isScheduledRun()&&clock.instant().atZone(InternshipSchedule.ZONE).getHour()>=17
+                || scheduledDeadline!=null&&!clock.instant().isBefore(scheduledDeadline.minusSeconds(sendReserveSeconds));
     }
     private volatile String scheduledSlot="",scheduledRoundId="";
     private volatile boolean scheduledAutoReview,scheduledDeadlineReached;
@@ -173,7 +175,7 @@ public class InternshipRunner {
             manager.ensureReady();manager.pauseBossMonitoring();
             return manager.callOnPlaywright(()->{
                 JSONObject job=entry.getJSONObject("job");
-                Page detail=manager.getBossPage().context().newPage();detail.navigate(navigationUrl(job));
+                Page detail=BackgroundBrowserPages.create(manager.getBossPage().context());detail.navigate(navigationUrl(job));
                 if(risk(detail) || !verifiedDetail(detail,job))throw new IllegalStateException("岗位详情或身份核对失败，未发送消息");
                 Locator button=detail.locator("a.btn-startchat,a.op-btn-chat").first();button.waitFor();
                 button.click();detail.locator("#chat-input[contenteditable='true'],textarea.input-area").first().waitFor();
@@ -205,7 +207,7 @@ public class InternshipRunner {
             return manager.callOnPlaywright(()->{
                 Page page=manager.getBossPage();
                 JSONObject fresh=findCurrentJob(page,entry.getJSONObject("job"));
-                Page detail=page.context().newPage();
+                Page detail=BackgroundBrowserPages.create(page.context());
                 try {
                     detail.navigate(navigationUrl(fresh));
                     detail.locator("a.btn-startchat,a.op-btn-chat").first().waitFor();
@@ -274,7 +276,7 @@ public class InternshipRunner {
                 manager.callOnPlaywright(()->{
                     if(!Boolean.TRUE.equals(manager.checkAndSaveBossSession().get("loggedIn")))
                         throw new IllegalStateException("专用Chrome登录已失效，请登录后重试；未发送消息");
-                    Page detail=manager.getBossPage().context().newPage();
+                    Page detail=BackgroundBrowserPages.create(manager.getBossPage().context());
                     try {
                         JSONObject expected=entry.getJSONObject("job");
                         detail.setDefaultTimeout(10000);detail.setDefaultNavigationTimeout(25000);
@@ -387,11 +389,11 @@ public class InternshipRunner {
                 JSONObject result=InternshipPolicy.evaluate(settings,job,answer).put("engine",model==null?"api":model.status().get("provider")).put("validationAttempts",attempt);
                 if(!result.has("validationFailure")||attempt==2||shouldStop()||(phase.equals("collect")&&collectionEnded()))return result;
                 prompt=InternshipPolicy.prompt(settings,job)+"\n上一次答复未通过引用校验："+result.getJSONObject("validationFailure")
-                        +"\n请重新完整判断并返回约定JSON。引用必须从jd或resumeText中复制连续原文，不能改写、补充经历、合并不相邻片段或用省略号代替。"
+                        +"\n请重新完整判断并返回约定JSON。优先填写对应证据表中的编号。直接引用必须从jd或resumeText中复制连续原文，不能改写、补充经历、合并不相邻片段或用省略号代替。"
                         +"不能找到简历依据时将resumeEvidence留空并如实调整decision、分数和unknowns。上次答复仅供纠错，不是事实依据：\n"+answer;
             }
             throw new IllegalStateException("判断未完成");
-        } catch (Exception e) { return InternshipPolicy.review("模型调用失败，未执行沟通").put("pendingModel",true); }
+        } catch (Exception e) { String detail=model==null?"模型调用失败":String.valueOf(model.status().getOrDefault("message","模型调用失败"));return InternshipPolicy.review(detail+"；未执行沟通").put("pendingModel",true); }
     }
 
     void scan(JSONObject c) {
@@ -545,7 +547,7 @@ public class InternshipRunner {
     boolean sendCandidate(JSONObject c,String id,JSONObject entry,Page list) {
         if(entry.getJSONObject("job").optString("platform").equals("shixiseng"))return shixiseng.deliver(c,id,entry,list,this::shouldStop);
         if(!entry.getJSONObject("job").optString("platform","boss").equals("boss"))return nativeSites.deliver(c,id,entry,list,this::shouldStop);
-        JSONObject job=entry.getJSONObject("job");Page detail=list.context().newPage();
+        JSONObject job=entry.getJSONObject("job");Page detail=BackgroundBrowserPages.create(list.context());
         try {
             detail.setDefaultTimeout(10000);detail.setDefaultNavigationTimeout(25000);
             detail.navigate(navigationUrl(job));if(risk(detail))return false;

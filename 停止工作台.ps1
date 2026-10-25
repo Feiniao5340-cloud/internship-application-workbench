@@ -1,4 +1,6 @@
 ﻿$ErrorActionPreference='Stop'
+New-Item -ItemType Directory -Path (Join-Path $PSScriptRoot 'config') -Force|Out-Null
+Set-Content -LiteralPath (Join-Path $PSScriptRoot 'config/manual-stop.flag') -Value ([DateTimeOffset]::UtcNow.ToString('o')) -Encoding UTF8
 $env:PSModulePath=(Join-Path $PSHOME 'Modules')+';'+$env:PSModulePath
 $registry=Join-Path $PSScriptRoot 'logs/process.json';if(!(Test-Path $registry)){Write-Output '工作台没有运行记录。';return}
 $record=Get-Content $registry -Raw -Encoding UTF8|ConvertFrom-Json;$process=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$record.pid)

@@ -14,13 +14,37 @@ class RoundDispatcherTest {
     RoundDispatcher dispatcher;
     Map<String,Fake> workers;
     static class Fake implements RoundDispatcher.Worker {
-        boolean busy,failStart;String blocked="";List<JSONObject> starts=new ArrayList<>();
+        boolean busy,failStart,failOutcome;String blocked="";List<JSONObject> starts=new ArrayList<>();
         public boolean running(){return busy;}public String blocked(String day){return blocked;}
         public void start(JSONObject job){if(failStart)throw new IllegalStateException("该平台登录失效");busy=true;starts.add(new JSONObject(job.toString()));}
-        public void stop(){busy=false;}public JSONObject outcome(JSONObject job){return new JSONObject().put("failed",false);}
+        public void stop(){busy=false;}public JSONObject outcome(JSONObject job){return new JSONObject().put("failed",failOutcome);}
     }
     @BeforeEach void setup(){repo=new ParallelRepository(directory.resolve("s.db"));workers=new LinkedHashMap<>();Map<String,RoundDispatcher.Worker> generic=new LinkedHashMap<>();for(String p:Platforms.IDS){Fake w=new Fake();workers.put(p,w);generic.put(p,w);}dispatcher=new RoundDispatcher(repo,generic,p->true);time("2026-10-20T07:00:00");dispatcher.setEnabled(true);}
     void time(String value){dispatcher.clock=Clock.fixed(LocalDateTime.parse(value).atZone(RoundDispatcher.ZONE).toInstant(),ZoneOffset.UTC);}
+    @Test void failedRoundRetriesExactlyOnceAndNotifiesBeforeRestart() {
+        dispatcher=new RoundDispatcher(repo,new LinkedHashMap<>(workers),p->p.equals("boss"));time("2026-10-20T07:00:00");dispatcher.setEnabled(true);
+        List<String> notifications=new ArrayList<>();repo.onEvent(e->{notifications.add(e.getString("type"));if(e.getString("type").equals("retry_started"))assertEquals(1,workers.get("boss").starts.size());});
+        dispatcher.tick();Fake w=workers.get("boss");w.failOutcome=true;w.blocked="模型网络连接中断";w.busy=false;time("2026-10-20T07:10:00");dispatcher.tick();
+        assertEquals(2,w.starts.size());assertEquals(1,w.starts.getLast().getInt("retryAttempt"));assertEquals("2026-10-19T23:24:00Z",w.starts.getLast().getString("deadline"));assertTrue(notifications.contains("retry_started"));
+        w.busy=false;dispatcher.tick();dispatcher.tick();assertEquals(2,w.starts.size());assertTrue(notifications.contains("retry_failed"));
+    }
+    @Test void quotaAndManualPauseNeverAutoRetry() {
+        dispatcher=new RoundDispatcher(repo,new LinkedHashMap<>(workers),p->p.equals("boss"));time("2026-10-20T07:00:00");dispatcher.setEnabled(true);dispatcher.tick();
+        Fake w=workers.get("boss");w.failOutcome=true;w.blocked="该平台今日已达到上限";w.busy=false;dispatcher.tick();assertEquals(1,w.starts.size());
+        time("2026-10-20T07:30:00");w.blocked="";dispatcher.tick();w.blocked="用户手动暂停";w.busy=false;dispatcher.tick();assertEquals(2,w.starts.size());
+    }
+    @Test void fourActivePlatformsStartAtSevenExactlyOnceAfterAnIdleRestartAndRepeatNextDay() {
+        var enabled=new HashSet<>(List.of("boss","shixiseng","zhilian","job51"));
+        dispatcher=new RoundDispatcher(repo,new LinkedHashMap<>(workers),enabled::contains);
+        time("2026-10-22T06:59:59");dispatcher.setEnabled(true);dispatcher.tick();assertTrue(dispatcher.state().getJSONObject("active").isEmpty());
+        dispatcher=new RoundDispatcher(repo,new LinkedHashMap<>(workers),enabled::contains);time("2026-10-22T07:00:00");dispatcher.tick();dispatcher.tick();
+        assertTrue(dispatcher.state().getBoolean("enabled"));assertEquals(3,dispatcher.state().getJSONObject("active").length());assertEquals(1,dispatcher.state().getJSONArray("pending").length());
+        assertTrue(workers.get("lagou").starts.isEmpty());assertEquals(3,workers.values().stream().mapToInt(w->w.starts.size()).sum());
+        workers.values().forEach(w->w.busy=false);dispatcher.tick();workers.values().forEach(w->w.busy=false);dispatcher.tick();
+        assertEquals(4,workers.values().stream().mapToInt(w->w.starts.size()).sum());
+        time("2026-10-23T06:59:59");dispatcher.tick();assertTrue(dispatcher.state().getJSONObject("active").isEmpty());
+        time("2026-10-23T07:00:00");dispatcher.tick();assertEquals(3,dispatcher.state().getJSONObject("active").length());assertEquals(1,dispatcher.state().getJSONArray("pending").length());
+    }
     @Test void fivePlatformsRunThreeAtOnceAndDrainWithoutOverlappingOnePlatform() {
         dispatcher.tick();assertEquals(3,dispatcher.state().getJSONObject("active").length());assertEquals(2,dispatcher.state().getJSONArray("pending").length());
         dispatcher.tick();assertEquals(3,workers.values().stream().filter(w->w.busy).count());
@@ -36,7 +60,7 @@ class RoundDispatcherTest {
     @Test void onePlatformFailureOrQuotaNeverBlocksOthers() {
         workers.get("boss").failStart=true;workers.get("shixiseng").blocked="今日上限";dispatcher.tick();
         assertTrue(workers.get("zhilian").busy);assertTrue(workers.get("job51").busy);assertTrue(workers.get("lagou").busy);
-        assertEquals(1,repo.events().length());assertEquals("2026-10-20",repo.document("boss","config").getString("holdDate"));
+        assertEquals(2,repo.events().length());assertEquals("2026-10-20",repo.document("boss","config").getString("holdDate"));
     }
     @Test void expiredQueuedTasksAreReportedAndNeverReplayed() {
         dispatcher.tick();time("2026-10-20T07:30:00");dispatcher.tick();

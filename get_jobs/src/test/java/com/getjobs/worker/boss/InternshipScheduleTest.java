@@ -62,6 +62,13 @@ class InternshipScheduleTest {
         var field=InternshipRunner.class.getDeclaredField("scheduledDeadline");field.setAccessible(true);
         assertFalse(real.shouldStop());field.set(real,Instant.parse("2026-10-19T09:00:00Z"));assertTrue(real.shouldStop());
     }
+    @Test void lateManualSlotCannotStartNewDeliveriesAfterSeventeenEvenWhenItsDeadlineIsLater() {
+        var real=new InternshipRunner(store,null,null,null,null,null);
+        org.springframework.test.util.ReflectionTestUtils.setField(real,"scheduledSlot","late-validation");
+        org.springframework.test.util.ReflectionTestUtils.setField(real,"scheduledDeadline",Instant.parse("2026-10-19T09:10:00Z"));
+        real.clock=Clock.fixed(Instant.parse("2026-10-19T08:59:00Z"),ZoneOffset.UTC);assertFalse(real.sendWindowEnded());
+        real.clock=Clock.fixed(Instant.parse("2026-10-19T09:00:00Z"),ZoneOffset.UTC);assertTrue(real.sendWindowEnded());assertFalse(real.shouldStop());
+    }
     @Test void fourSlotsAlternatePlatformsAndSources() {
         store.saveShixisengState(new JSONObject().put("liveSubmissionVerified",true));
         for(String minute:new String[]{"00","15","30","45"}) {time("2026-10-19T07:"+minute+":00");schedule.tick();}

@@ -11,3 +11,5 @@ Node版本在release-manifest.json，对应版本许可保存在runtime/node/LIC
 浏览器驱动来自Patchright/Playwright，完整包内LICENSE/NOTICE保留于driver/package；Java依赖许可随各依赖JAR保留。构建依赖见get_jobs/build.gradle.kts。未捆绑Chrome/Edge或Codex程序、用户会话和模型额度。
 
 本文件是来源清单，不意味着已经完成所有分发法务核验。公开发布或商业使用前应复核所有适用许可证；上游非商业限制不得忽略。
+
+JNA 5.17.0 用于Windows后台窗口控制；许可证与来源说明见 get_jobs/third-party/jna。

@@ -1,6 +1,7 @@
 package com.getjobs.worker.boss;
 
 import com.microsoft.playwright.*;
+import com.getjobs.worker.manager.BackgroundBrowserPages;
 import org.json.*;
 import org.springframework.stereotype.Service;
 import java.net.URLEncoder;
@@ -30,7 +31,7 @@ public class InternshipShixiseng {
                 "nodes",p.locator(".intern-content-href,.intern-wrap,a[href*='/intern/']").evaluateAll("els=>els.slice(0,6).map(e=>({tag:e.tagName,attrs:Array.from(e.attributes).map(a=>[a.name,a.value]),text:e.innerText.slice(0,180)}))"));
     }
     Page page(Page boss) {
-        if(page==null||page.isClosed()) {page=boss.context().newPage();page.setDefaultTimeout(8000);page.setDefaultNavigationTimeout(25000);}
+        if(page==null||page.isClosed()) {page=BackgroundBrowserPages.create(boss.context());page.setDefaultTimeout(8000);page.setDefaultNavigationTimeout(25000);}
         return page;
     }
     static boolean validUrl(String url) {return url.matches("https://www\\.shixiseng\\.com/intern/inn_[A-Za-z0-9]+(?:\\?.*)?");}
@@ -39,7 +40,7 @@ public class InternshipShixiseng {
     }
     static boolean loggedIn(Page p) {return p.locator(".logined .mine").all().stream().anyMatch(Locator::isVisible)&&!text(p,".logined .nickname").isBlank();}
     public Map<String,Object> checkSession(Page boss) {
-        Page p=page(boss);p.navigate(HOME);p.bringToFront();
+        Page p=page(boss);p.navigate(HOME);
         try {p.locator(".login-status").first().waitFor();p.waitForTimeout(1000);}catch(PlaywrightException ignored) {}
         boolean logged=loggedIn(p);
         session=Map.of("loggedIn",logged,"account",logged?text(p,".logined .nickname"):"","persistent",true,
@@ -86,7 +87,7 @@ public class InternshipShixiseng {
             for(String url:jobs) {
                 if(stopped.getAsBoolean()||count>=c.getInt("maxScan"))return;
                 if(!seen.add(url)||store.blocksRetry(store.get(InternshipPolicy.hash(url))))continue;
-                Page detail=list.context().newPage();detail.setDefaultTimeout(8000);detail.setDefaultNavigationTimeout(25000);
+                Page detail=BackgroundBrowserPages.create(list.context());detail.setDefaultTimeout(8000);detail.setDefaultNavigationTimeout(25000);
                 try {
                     detail.navigate(url);JSONObject job=readJob(detail,url);
                     if(!InternshipPolicy.formalReason(job).isBlank()) {accept.accept(job);continue;}

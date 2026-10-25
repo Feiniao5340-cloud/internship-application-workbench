@@ -20,6 +20,7 @@ public class PlatformWorker implements RoundDispatcher.Worker {
     private final Map<String,String> manualClaims=new HashMap<>();
     private final Map<String,String> automaticClaimDays=new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.atomic.AtomicBoolean controlBusy=new java.util.concurrent.atomic.AtomicBoolean();
+    private volatile boolean manualBrowser;
     private volatile Map<String,Object> session=Map.of("loggedIn",false,"message","尚未检查独立登录态");
     public PlatformWorker(String id,ParallelRepository repository,Supplier<JSONObject> profile,InternshipRunner base,PlaywrightManager baseBrowser,InternshipModel model,boolean live,boolean sending,boolean modeling,boolean protect) {
         this.id=Platforms.require(id);this.repository=repository;this.profile=profile;this.live=live;this.sending=sending;this.modeling=modeling;this.protect=protect;
@@ -32,6 +33,8 @@ public class PlatformWorker implements RoundDispatcher.Worker {
     }
     private static String today(){return LocalDate.now(RoundDispatcher.ZONE).toString();}
     public JSONObject config(){return repository.document(id,"config");}
+    boolean backgroundBrowser(){return Platforms.available(id)&&config().optString("browserMode","background").equals("background");}
+    private void prepareAutomaticBrowser(){boolean background=backgroundBrowser();browser.setHeadlessMode(!background);browser.setBackgroundMode(background);}
     public boolean protectedAccount(){return protect&&Platforms.protectedAccount(id);}
     public JSONObject effective() {
         JSONObject c=new JSONObject(profile.get().toString()),config=config();c.put("platform",id);
@@ -49,6 +52,7 @@ public class PlatformWorker implements RoundDispatcher.Worker {
         return proof!=null&&proof.optBoolean("liveSubmissionVerified")&&(!id.equals("job51")||proof.optString("adapter").equals(InternshipYingjiesheng.ADAPTER));
     }
     @Override public String blocked(String day) {
+        if(manualBrowser)return "浏览器正在人工处理；请点击返回无界面运行后再执行轮次";
         JSONObject config=config();if(day.equals(config.optString("holdDate")))return config.optString("holdReason");
         JSONObject state=store.scheduleState().getJSONObject("platforms").getJSONObject(id);
         if(day.equals(state.optString("quotaDate")))return "该平台今日已达到上限";
@@ -56,9 +60,33 @@ public class PlatformWorker implements RoundDispatcher.Worker {
     }
     @Override public void start(JSONObject job) {
         if(protectedAccount())throw new IllegalStateException("生产账号保护：本次开发不登录或投递旧版BOSS/实习僧账号");
+        if(manualBrowser)throw new IllegalStateException("请先返回无界面运行");
+        prepareAutomaticBrowser();
+        if(job.optInt("retryAttempt")==1)prepareRetry(job);
         JSONObject c=effective().put("source",job.getString("source"));store.saveSettings(c);
+        if(job.optInt("retryAttempt")==1) {
+            long sent=store.records().toMap().values().stream().map(v->new JSONObject((Map<?,?>)v)).filter(e->e.optString("roundId").equals(job.optString("retryRoundId"))&&e.optString("status").equals("complete")).count();
+            int remaining=c.getInt("maxSend")-(int)sent;if(remaining<=0)c.put("mode","scan");else c.put("maxSend",remaining);store.saveSettings(c);
+        }
         store.updateSchedule(s->s.put("day",today()).put("active",new JSONObject(job.toString())));
         runner.startConfiguredRound(c,job.getString("id"),Instant.parse(job.getString("deadline")));
+    }
+    private void prepareRetry(JSONObject job) {
+        String day=today();JSONObject config=config(),state=store.scheduleState().getJSONObject("platforms").getJSONObject(id);
+        String reason=blocked(day);
+        if(day.equals(state.optString("quotaDate"))||reason.contains("用户手动暂停")||reason.contains("人工处理"))throw new IllegalStateException("人工暂停、验证处理或当日上限仍有效，未自动恢复");
+        JSONObject entries=store.records();
+        for(String key:entries.keySet()) {
+            JSONObject entry=entries.getJSONObject(key);
+            if(!entry.optString("roundId").equals(job.optString("retryRoundId")))continue;
+            if(!store.blocksRetry(entry)||entry.optString("status").equals("complete"))continue;
+            // Never replay an uncertain submission. The retry may only read its receipt.
+            if(!id.equals("zhilian")||!entry.optString("status").equals("native_attempted"))throw new IllegalStateException("存在未确认的发送，自动重试仅核对回执，未重新发送");
+            browser.ensureReady();browser.callOnPlaywright(()->nativeSites.verifyExistingReceipt(key,entry,browser.getBossPage(),entry.getJSONObject("job").optString("navigationUrl",entry.getJSONObject("job").getString("url"))));
+            repository.resolveConfirmed(id,key);
+        }
+        config.remove("holdDate");config.remove("holdReason");repository.document(id,"config",config);
+        store.updateSchedule(s->{JSONObject target=s.getJSONObject("platforms").getJSONObject(id);target.remove("holdDate");target.remove("holdReason");});
     }
     @Override public void stop(){runner.stop();}
     @Override public JSONObject outcome(JSONObject job) {
@@ -67,12 +95,14 @@ public class PlatformWorker implements RoundDispatcher.Worker {
         return result;
     }
     public void reserveControl(){if(runner.isRunning()||!controlBusy.compareAndSet(false,true))throw new IllegalStateException("该平台正在运行");}
-    public Map<String,Object> checkReservedSession() {
+    public Map<String,Object> checkReservedSession() { return checkReservedSession(false); }
+    public Map<String,Object> checkReservedSession(boolean visible) {
         if(!controlBusy.get())throw new IllegalStateException("未取得平台控制名额");
         try {
         if(!live)throw new IllegalStateException("开发浏览器未开启");
         if(protectedAccount())throw new IllegalStateException("生产账号保护，不能在开发版登录旧版账号");
-        browser.ensureReady();session=browser.callOnPlaywright(()->id.equals("shixiseng")?runner.checkShixisengSession():id.equals("boss")?browser.checkAndSaveBossSession():nativeSites.checkSession(browser.getBossPage()));return session;}
+        if(visible){browser.setBackgroundMode(false);browser.setHeadlessMode(false);}else prepareAutomaticBrowser();manualBrowser=visible;
+        browser.ensureReady();if(visible){browser.callOnPlaywright(()->{browser.getBossPage().bringToFront();return null;});return Map.of("loggedIn",session.getOrDefault("loggedIn",false),"message","已显示专用浏览器，请手动处理；未刷新页面或检查登录");}session=browser.callOnPlaywright(()->id.equals("shixiseng")?runner.checkShixisengSession():id.equals("boss")?browser.checkAndSaveBossSession():nativeSites.checkSession(browser.getBossPage()));return session;}
         finally{controlBusy.set(false);}
     }
     public Object reservedDiagnostic(String url) {
@@ -84,6 +114,8 @@ public class PlatformWorker implements RoundDispatcher.Worker {
     }
     public synchronized void manualSend(String job,boolean acceptance) {
         if(running())throw new IllegalStateException("该平台正在运行");
+        if(manualBrowser)throw new IllegalStateException("请先返回无界面运行");
+        prepareAutomaticBrowser();
         if(!sending||protectedAccount())throw new IllegalStateException("开发副本发送锁定");
         if(!config().optBoolean("resumeReady"))throw new IllegalStateException("该平台简历尚未就绪");
         if(!acceptance&&!effective().getString("mode").equals("auto"))throw new IllegalStateException("该平台尚未通过真实投递验收");
@@ -96,7 +128,7 @@ public class PlatformWorker implements RoundDispatcher.Worker {
     }
     public Object verifyReservedReceipt(String job,String url) {
         if(!controlBusy.get())throw new IllegalStateException("未取得平台控制名额");
-        try{JSONObject entry=store.get(job);if(entry==null)throw new IllegalArgumentException("岗位不存在");browser.ensureReady();
+        try{JSONObject entry=store.get(job);if(entry==null)throw new IllegalArgumentException("岗位不存在");prepareAutomaticBrowser();browser.ensureReady();
             Object proof=browser.callOnPlaywright(()->nativeSites.verifyExistingReceipt(job,entry,browser.getBossPage(),url));
             repository.resolveConfirmed(id,job);return proof;
         }finally{controlBusy.set(false);}
@@ -125,7 +157,7 @@ public class PlatformWorker implements RoundDispatcher.Worker {
         }manualClaims.clear();
     }
     public Map<String,Object> status() {
-        JSONObject config=config();Map<String,Object> result=new LinkedHashMap<>();result.put("id",id);result.put("label",Platforms.label(id));result.put("running",running());result.put("progress",runner.status().get("progress"));result.put("config",config.toMap());result.put("session",session);result.put("protectedAccount",protectedAccount());result.put("round",store.roundSummary().toMap());result.put("blockedReason",blocked(today()));result.put("effectiveMode",effective().optString("mode"));result.put("liveVerified",liveVerified());return result;
+        JSONObject config=config();Map<String,Object> result=new LinkedHashMap<>();result.put("browserMode",manualBrowser?"visible":backgroundBrowser()?"background":"headless");result.put("browserInitialized",browser.isInitialized());result.put("id",id);result.put("label",Platforms.label(id));result.put("running",running());result.put("progress",runner.status().get("progress"));result.put("config",config.toMap());result.put("session",session);result.put("protectedAccount",protectedAccount());result.put("round",store.roundSummary().toMap());result.put("blockedReason",blocked(today()));result.put("effectiveMode",effective().optString("mode"));result.put("liveVerified",liveVerified());return result;
     }
     public void close(){if(browser.isInitialized())browser.callOnPlaywright(()->{browser.destroy();return null;});}
 }
